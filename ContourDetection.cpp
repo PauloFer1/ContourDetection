@@ -19,8 +19,40 @@ int max_thresh = 255;
 RNG rng(12345);
 float nearD = 1000;
 Point near1, near2;
+int imgWidth;
+int imgHeight;
+int thresh_corner = 200;
 
 
+void detectCorners(int, void*)
+{
+	Mat dst, dst_norm, dst_norm_scaled;
+	dst = Mat::zeros(src.size(), CV_32FC1);
+	Mat clone = src.clone();
+	Mat canny_output;
+	Canny(src_gray, canny_output, thresh, thresh * 2, 3);
+
+	int blockSize = 2;
+	int apertureSize = 3;
+	double k = 0.04;
+
+	cornerHarris(canny_output, dst, blockSize, apertureSize, k, BORDER_DEFAULT);
+
+	normalize(dst, dst_norm, 0, 255, NORM_MINMAX, CV_32FC1, Mat());
+	convertScaleAbs(dst_norm, dst_norm_scaled);
+
+	for (int j = 0; j < dst_norm.rows; j++)
+	{
+		for (int i = 0; i < dst_norm.cols; i++)
+		{
+			if ((int)dst_norm.at<float>(j, i)>thresh_corner)
+			{
+				circle(clone, Point(i, j), 5, Scalar(0,0,255), 2, 8, 0);
+			}
+		}
+	}
+	imshow("ORIGINAL", clone);
+}
 /** @function thresh_callback */
 void thresh_callback(int, void*)
 {
@@ -32,7 +64,7 @@ void thresh_callback(int, void*)
 	HoughLines(canny_output, lines, 1, CV_PI / 180, 150, 0, 0);
 
 	Mat clone = src.clone();
-	Point c = Point(400,400);
+	Point c = Point(imgWidth/2,imgHeight/2);
 	
 	
 	// draw line
@@ -68,12 +100,25 @@ void thresh_callback(int, void*)
 		
 	}
 	
-	Point c1 = Point(380, 400);
-	Point c2 = Point(420,400);
-	Point c3 = Point(400, 380);
-	Point c4 = Point(400, 420);
+	Point c1 = Point(imgWidth/2 - 20, imgHeight/2);
+	Point c2 = Point(imgWidth/2+20, imgHeight/2);
+	Point c3 = Point(imgWidth/2, imgHeight/2 - 20);
+	Point c4 = Point(imgWidth/2, imgHeight/2 + 20);
 	line(clone, c1, c2, Scalar(100, 0, 255), 1, CV_AA);
 	line(clone, c3, c4, Scalar(100, 0, 255), 1, CV_AA);
+
+	int row =0;
+
+	for (int i = canny_output.rows/2; i > 1; i--)
+	{
+		if ((int)canny_output.at<uchar>(canny_output.cols / 2, i) > 0)
+		{
+			row = i;
+			i = 0;
+		}
+	}
+	cout << "First Contour: " << row << "\n";
+	line(clone, Point(imgWidth / 2 - 20, row), Point(imgWidth / 2 + 20, row), Scalar(100, 0, 255), 1, CV_AA);
 
 	imshow("CONTOUR", canny_output);
 	imshow("ORIGINAL", clone);
@@ -86,8 +131,11 @@ int _tmain(int argc, _TCHAR* argv[])
 	printf("==============================================================================\n\n");
 
 	//»»»»»»»»»»»»»» IMAGE
-	 src_gray = imread( "fotografia.JPG", 0);
-	 src = imread("fotografia.JPG");
+	 src_gray = imread( "amostra.jpg", 0);
+	 src = imread("amostra.jpg");
+
+	 resize(src, src, Size(), 0.5, 0.5, INTER_CUBIC);
+	 resize(src_gray, src_gray, Size(), 0.5, 0.5, INTER_CUBIC);
 
 	 /// Convert image to gray and blur it
 	
@@ -100,10 +148,17 @@ int _tmain(int argc, _TCHAR* argv[])
 	namedWindow("CONTOUR", CV_WINDOW_AUTOSIZE);
 	namedWindow("ORIGINAL", CV_WINDOW_AUTOSIZE);
 
-	
+	imgWidth = src.size().width;
+	imgHeight = src.size().height;
 
-	createTrackbar(" Canny thresh:", "CONTOUR", &thresh, max_thresh, thresh_callback);
+	createTrackbar("Canny thresh:", "CONTOUR", &thresh, max_thresh, thresh_callback);
+	createTrackbar("Corner thresh:", "CONTOUR", &thresh_corner, max_thresh, detectCorners);
 	thresh_callback(0, 0);
+	detectCorners(0, 0);
+
+
+
+
 
 	cout << "width=" << src.size().width << "\n";
 
