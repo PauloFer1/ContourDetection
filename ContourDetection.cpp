@@ -26,6 +26,8 @@ int imgHeight;
 int thresh_corner = 200;
 int alpha = 1; /**< Simple contrast control */
 int beta = 100;  /**< Simple brightness control */
+int blurValue = 1;
+
 
 
 void detectCorners(int, void*)
@@ -86,13 +88,26 @@ void thresh_callback2(int, void*)
 	cout << "PixelCount: " << pixelCount << " ,total: " << total  << "\n";
 	cout << total << "\n";
 }
+/* function draw Gripper */
+void drawGripper(Mat img, Point2f center, float angle)
+{
+	RotatedRect rect = RotatedRect(center, Size2f(200.0, 240.0), angle);
+
+	Point2f vertices[4];
+	rect.points(vertices);
+	for (int i = 0; i < 4; i++)
+		line(img, vertices[i], vertices[(i + 1) % 4], Scalar(0, 255, 0));
+}
 /** @function thresh_callback */
 void thresh_callback(int, void*)
 {
 	Mat canny_output;
 	Mat blured;
 	Mat lap;
-	blur(src_gray, blured, Size(2, 2));
+	if (blurValue != 0)
+		blur(src_gray, blured, Size(blurValue, blurValue));
+	else
+		blured = src_gray;
 	//Laplacian(blured, lap,CV_8S);
 
 	blured.convertTo(lap, -1, alpha, beta);
@@ -243,6 +258,8 @@ void thresh_callback(int, void*)
 	line(clone, c1, c2, Scalar(100, 0, 255), 1, CV_AA);
 	line(clone, c3, c4, Scalar(100, 0, 255), 1, CV_AA);
 
+	drawGripper(clone, Point2f(((imgWidth / 2) - dif), ((imgHeight / 2) - difH)), deg);
+
 
 	imshow("CONTOUR", canny_output);
 	imshow("ORIGINAL", clone);
@@ -261,13 +278,31 @@ int _tmain(int argc, _TCHAR* argv[])
 		cout << "CAMERA NOT CONNECTED!";
 		return(-1);
 	}
-	cap.set(CV_CAP_PROP_FRAME_HEIGHT, 1080);
-	cap.set(CV_CAP_PROP_FRAME_WIDTH, 1920);
+	
+	
 	//»»»»»»»»»»»»»» IMAGE
 	// src_gray = imread( "red2.jpg", 0);
 	// src = imread("red2.jpg");
+
+	Sleep(2);
+	//cap.set(CV_CAP_PROP_MODE, -2);
+	Sleep(2);
+	//cap.set(CV_CAP_PROP_FPS, 1);
+	Sleep(2);
+	cap.set(CV_CAP_PROP_FRAME_WIDTH, 320);
+	Sleep(2);
+	cap.set(CV_CAP_PROP_FRAME_HEIGHT, 240);
+	Sleep(2);
+	cap.set(CV_CAP_PROP_BRIGHTNESS, 100.0);
+	Sleep(2);
+	cap.set(CV_CAP_PROP_CONTRAST, 10.0);
+	Sleep(2);
+	cap.set(CV_CAP_PROP_EXPOSURE, 10.0);
+
 	cap >> src;
 	cvtColor(src, src_gray, CV_BGR2GRAY);
+
+	cout << cap.get(CV_CAP_PROP_MODE);
 
 
 //	 resize(src, src, Size(), 0.5, 0.5, INTER_CUBIC);
@@ -288,6 +323,7 @@ int _tmain(int argc, _TCHAR* argv[])
 	imgHeight = src.size().height;
 
 	createTrackbar("Canny thresh:", "CONTOUR", &thresh, max_thresh, thresh_callback2);
+	createTrackbar("Blur:", "CONTOUR", &blurValue, 8, thresh_callback);
 	//createTrackbar("Corner thresh:", "CONTOUR", &thresh_corner, max_thresh, detectCorners);
 	//createTrackbar("Bright:", "CONTOUR", &beta, 300, detectCorners);
 	//createTrackbar("Contrast:", "CONTOUR", &alpha, 3, detectCorners);
