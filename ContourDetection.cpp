@@ -4,16 +4,28 @@
 #include <gl\gl.h>		
 #include <gl\glu.h>	
 #include <iostream>
+#include <fstream>
+#import <msxml6.dll> raw_interfaces_only
 
 
 #include "opencv2\core\core.hpp"
 #include "opencv2\highgui\highgui.hpp"
 #include "opencv2\imgproc\imgproc.hpp"
 
+#include "libxl.h"
+
 using namespace cv;
 using namespace std;
+using namespace libxl;
+//using namespace MSXML2;
 
 #define PI 3.14159265;
+// Macro that calls a COM method returning HRESULT value.
+#define CHK_HR(stmt)        do { hr=(stmt); if (FAILED(hr)) goto CleanUp; } while(0)
+// Macro to verify memory allcation.
+#define CHK_ALLOC(p)        do { if (!(p)) { hr = E_OUTOFMEMORY; goto CleanUp; } } while(0)
+// Macro that releases a COM object if not NULL.
+#define SAFE_RELEASE(p)     do { if ((p)) { (p)->Release(); (p) = NULL; } } while(0)
 
 Mat src, src_gray, src_canny;
 int thresh = 100;
@@ -24,11 +36,326 @@ Point near1, near2;
 int imgWidth;
 int imgHeight;
 int thresh_corner = 200;
-int alpha = 1; /**< Simple contrast control */
-int beta = 100;  /**< Simple brightness control */
+int alpha = 10; /**< Simple contrast control */
+int beta = 0;  /**< Simple brightness control */
+int exposure = 6;
 int blurValue = 1;
+VideoCapture cap;
+int isCalib = 0;
+int calibTotal=0;
+int offsetX = 100;
+
+//************* @XML
+void saveXML()
+{
+	ofstream xml("config.xml");
+	if (xml.is_open())
+	{
+		xml << "<?xml"; 
+		xml << "version = ";
+		xml << "'1.0' ?> \n";
+
+		xml << "<config xmlns:dt='urn:schemas - microsoft - com : datatypes'>\n";
+		xml << "<threshold dt:dt='int'>" << thresh << "</threshold>\n";
+		xml << "<blur dt:dt='int'>" << blurValue << "</blur>\n";
+		xml << "<bright dt:dt='int'>" << beta << "</bright>\n";
+		xml << "<contrast dt:dt='int'>" << alpha << "</contrast>\n";
+		xml << "<exposure dt:dt='int'>" << (exposure-10) << "</exposure>\n";
+		xml << "<measure dt:dt='int'>" << calibTotal << "</measure>\n";
+		xml << "</config>";
+
+		xml.close();
+	}
+	cout << "CONFIG FILE SAVED!";
+}
+// Helper function to create a VT_BSTR variant from a null terminated string. 
+HRESULT VariantFromString(PCWSTR wszValue, VARIANT &Variant)
+{
+	HRESULT hr = S_OK;
+	BSTR bstr = SysAllocString(wszValue);
+	CHK_ALLOC(bstr);
+
+	V_VT(&Variant) = VT_BSTR;
+	V_BSTR(&Variant) = bstr;
+
+CleanUp:
+	return hr;
+}
+
+// Helper function to create a DOM instance. 
+HRESULT CreateAndInitDOM(IXMLDOMDocument **ppDoc)
+{
+	HRESULT hr = CoCreateInstance(__uuidof(MSXML2::DOMDocument60), NULL, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(ppDoc));
+	if (SUCCEEDED(hr))
+	{
+		// these methods should not fail so don't inspect result
+		(*ppDoc)->put_async(VARIANT_FALSE);
+		(*ppDoc)->put_validateOnParse(VARIANT_FALSE);
+		(*ppDoc)->put_resolveExternals(VARIANT_FALSE);
+	}
+	return hr;
+}
+HRESULT ReportParseError(IXMLDOMDocument *pDoc, char *szDesc)
+{
+	HRESULT hr = S_OK;
+	HRESULT hrRet = E_FAIL; // Default error code if failed to get from parse error.
+	IXMLDOMParseError *pXMLErr = NULL;
+	BSTR bstrReason = NULL;
+
+	CHK_HR(pDoc->get_parseError(&pXMLErr));
+	CHK_HR(pXMLErr->get_errorCode(&hrRet));
+	CHK_HR(pXMLErr->get_reason(&bstrReason));
+	printf("%s\n%S\n", szDesc, bstrReason);
+
+CleanUp:
+	SAFE_RELEASE(pXMLErr);
+	SysFreeString(bstrReason);
+	return hrRet;
+}
+
+void loadDOM()
+{
+	HRESULT hr = S_OK;
+	IXMLDOMDocument *pXMLDom = NULL;
+	IXMLDOMParseError *pXMLErr = NULL;
+	IXMLDOMNodeList *pNodes = NULL;
+	IXMLDOMNode *pNode = NULL;
+
+	BSTR bstrXML = NULL;
+	BSTR bstrErr = NULL;
+	VARIANT_BOOL varStatus;
+	VARIANT varFileName;
+	VariantInit(&varFileName);
+
+	CHK_HR(CreateAndInitDOM(&pXMLDom));
+
+	// XML file name to load
+	CHK_HR(VariantFromString(L"config.xml", varFileName));
+	CHK_HR(pXMLDom->load(varFileName, &varStatus));
+	if (varStatus == VARIANT_TRUE)
+	{
+		CHK_HR(pXMLDom->get_xml(&bstrXML));
+		printf("XML DOM loaded from config.xml:\n%S\n", bstrXML);
+	}
+	else
+	{
+		// Failed to load xml, get last parsing error
+		CHK_HR(pXMLDom->get_parseError(&pXMLErr));
+		CHK_HR(pXMLErr->get_reason(&bstrErr));
+		printf("Failed to load DOM from config.xml. %S\n", bstrErr);
+	}
+
+	// Query a single node.
+	BSTR bstrQuery1 = NULL;
+	BSTR bstrQuery2 = NULL;
+	BSTR bstrNodeName = NULL;
+	BSTR bstrNodeValue = NULL;
+
+	bstrQuery1 = SysAllocString(L"//config[1]/*");
+	CHK_ALLOC(bstrQuery1);
+	CHK_HR(pXMLDom->selectNodes(bstrQuery1, &pNodes));
+	if (pNodes)
+	{
+	/*	printf("Result from selectSingleNode:\n");
+		CHK_HR(pNode->get_nodeName(&bstrNodeName));
+		printf("Node, <%S>:\n", bstrNodeName);
+		SysFreeString(bstrNodeName);
+		*/
+		long length;
+		CHK_HR(pNodes->get_length(&length));
+		for (long i = 0; i < length; i++)
+		{
+			CHK_HR(pNodes->get_item(i, &pNode));
+			CHK_HR(pNode->get_nodeName(&bstrNodeName));
+
+			BSTR s;
+			char *sc;
+			int v;
+			if (!wcscmp(bstrNodeName, L"bright"))
+			{
+				
+				pNode->get_text(&s);
+				sc = _com_util::ConvertBSTRToString(s);
+				v = atoi(sc);
+				beta = v;
+			}
+			else if (!wcscmp(bstrNodeName, L"contrast"))
+			{
+				pNode->get_text(&s);
+				sc = _com_util::ConvertBSTRToString(s);
+				v = atoi(sc);
+				beta = v;
+			}
+			else if (!wcscmp(bstrNodeName, L"threshold"))
+			{
+				pNode->get_text(&s);
+				sc = _com_util::ConvertBSTRToString(s);
+				v = atoi(sc);
+				thresh = v;
+			}
+			else if (!wcscmp(bstrNodeName, L"blur"))
+			{
+				pNode->get_text(&s);
+				sc = _com_util::ConvertBSTRToString(s);
+				v = atoi(sc);
+				blurValue = v;
+			}
+			else if (!wcscmp(bstrNodeName, L"exposure"))
+			{
+				pNode->get_text(&s);
+				sc = _com_util::ConvertBSTRToString(s);
+				v = atoi(sc);
+				exposure = v;
+			}
+			else if (!wcscmp(bstrNodeName, L"measure"))
+			{
+				pNode->get_text(&s);
+				sc = _com_util::ConvertBSTRToString(s);
+				v = atoi(sc);
+				calibTotal = v;
+			}
+
+			SysFreeString(bstrNodeName);
+			CHK_HR(pNode->get_xml(&bstrNodeValue));
+			SysFreeString(bstrNodeValue);
+			SAFE_RELEASE(pNode);
+		}
+	}
+	else
+	{
+		CHK_HR(ReportParseError(pXMLDom, "Error while calling selectSingleNode."));
+	}
 
 
+CleanUp:
+	SAFE_RELEASE(pXMLDom);
+	SAFE_RELEASE(pXMLErr);
+	SysFreeString(bstrXML);
+	SysFreeString(bstrErr);
+	VariantClear(&varFileName);
+}
+
+void drawStatus(Mat clone, Scalar color, char* text)
+{
+	rectangle(clone, Rect(0.0, 0.0, imgWidth, 20), color, CV_FILLED);
+
+	putText(clone, text, Point((imgWidth / 2) - 15, 13), FONT_HERSHEY_SIMPLEX, 0.4, Scalar(255, 255, 255), 1);
+}
+void calibrate()
+{
+	isCalib = 1;
+}
+void calibrating(Mat canny_output)
+{
+	int lInc = 0;
+	int rInc = 0;
+
+	for (int j = canny_output.cols / 2; j > 0; j--)
+	{
+		lInc++;
+		if ((int)canny_output.at<uchar>(canny_output.rows / 2, j) > 0)
+		{
+			break;
+		}
+	}
+	for (int k = canny_output.cols / 2; k < canny_output.cols; k++)
+	{
+		rInc++;
+		if ((int)canny_output.at<uchar>(canny_output.rows / 2, k) > 0)
+		{
+			break;
+		}
+	}
+
+	calibTotal = lInc + rInc;
+
+	cout << "CALIB: " << calibTotal;
+
+	isCalib = 0;
+}
+int getMeasure(int value)
+{
+	if (calibTotal == 0)
+		return(0);
+	int x = (210 * value) / calibTotal;
+	return(x);
+}
+void writeXLS(int x, int y, int rot)
+{
+	Book* book = xlCreateBook(); // xlCreateXMLBook() for xlsx
+	if (book)
+	{
+		Sheet* sheet = book->addSheet("Sheet1");
+		if (sheet)
+		{
+			sheet->writeStr(1, 0, "WRITE");
+			sheet->writeNum(1, 1, 0);
+			sheet->writeStr(2, 0, "X");
+			sheet->writeNum(2, 1, x);
+			sheet->writeStr(3, 0, "Y");
+			sheet->writeNum(3, 1, y);
+			sheet->writeStr(4, 0, "ROT");
+			sheet->writeNum(4, 1, rot);
+			sheet->writeStr(5, 0, "FAULT");
+			sheet->writeNum(5, 1, 0);
+		}
+		book->save("coords.xls");
+		book->release();
+	}
+}
+void readXLS()
+{
+	Book* book = xlCreateBook();
+
+	if (book->load("coords.xls"))
+	{
+		Sheet* sheet = book->getSheet(0);
+		if (sheet)
+		{
+			cout << "READ: " << sheet->readNum(1, 1) << "\n" << "X: " << sheet->readNum(2, 1) << "\n" << "y: " << sheet->readNum(3, 1) << "\n" << "ROT: " << sheet->readNum(4, 1) << "\n\n";
+		}
+	}
+	book->release();
+}
+int getReadTag()
+{
+	Book* book = xlCreateBook();
+	int read = 0;
+
+	if (book->load("coords.xls"))
+	{
+		Sheet* sheet = book->getSheet(0);
+		if (sheet)
+		{
+			read = sheet->readNum(1, 1);
+		}
+	}
+	book->release();
+
+	Book* xml = xlCreateXMLBook();
+	if (xml->load("config.xml"))
+	{
+		
+	}
+
+	return(read);
+}
+void setBright(int, void*)
+{
+	cap.set(CV_CAP_PROP_BRIGHTNESS, beta);
+}
+void setContrast(int, void*)
+{
+	cap.set(CV_CAP_PROP_CONTRAST, alpha);
+}
+void setExposure(int, void*)
+{
+	cap.set(CV_CAP_PROP_EXPOSURE, exposure-10);
+}
+void setOffset(int, void*)
+{
+	cap.set(CV_CAP_PROP_XI_OFFSET_X, offsetX - 100);
+}
 
 void detectCorners(int, void*)
 {
@@ -36,7 +363,7 @@ void detectCorners(int, void*)
 	dst = Mat::zeros(src.size(), CV_32FC1);
 	Mat clone = src.clone();
 	Mat canny_output;
-	Canny(src_gray, canny_output, thresh, thresh * 2, 3);
+	Canny(src_gray, canny_output, thresh, thresh * 4, 3);
 
 	int blockSize = 2;
 	int apertureSize = 3;
@@ -122,7 +449,7 @@ void thresh_callback(int, void*)
 	Point c = Point(imgWidth/2,imgHeight/2);
 
 	src_canny = canny_output;
-	
+
 	
 	// draw line
 	/*for (size_t i = 0; i < lines.size(); i++)
@@ -159,107 +486,168 @@ void thresh_callback(int, void*)
 
 	int colL = 0;
 	int colR = 0;
+	int col2L = 0;
+	int col2R = 0;
+	const int INC_HEIGHT = 60;
 
-	//***************** LATERAIS
-	for (int l = canny_output.rows / 2; l < canny_output.rows; l++)
-	{
-		if ((int)canny_output.at<uchar>(l, canny_output.cols / 2) > 0)
+		//***************** CALIBRATION
+	if (isCalib == 1)
+		calibrating(canny_output);
+		//***************** LATERAIS
+		for (int l = canny_output.rows / 2; l < canny_output.rows; l++)
 		{
-			rowB = l;
-			break;
+			if ((int)canny_output.at<uchar>(l, canny_output.cols / 2) > 0)
+			{
+				rowB = l;
+				break;
+			}
 		}
-	}
-	for (int j = canny_output.cols / 2; j > 0; j--)
-	{
-		if ((int)canny_output.at<uchar>(canny_output.rows / 2, j) > 0)
+		for (int j = canny_output.cols / 2; j > 0; j--)
 		{
-			colL = j;
-			break;
+			if ((int)canny_output.at<uchar>(canny_output.rows / 2, j) > 0)
+			{
+				colL = j;
+				break;
+			}
 		}
-	}
-	for (int k = canny_output.cols / 2; k < canny_output.cols; k++)
-	{
-		if ((int)canny_output.at<uchar>(canny_output.rows / 2, k) > 0)
+		for (int k = canny_output.cols / 2; k < canny_output.cols; k++)
 		{
-			colR = k;
-			break;
+			if ((int)canny_output.at<uchar>(canny_output.rows / 2, k) > 0)
+			{
+				colR = k;
+				break;
+			}
 		}
-	}
-	int wR = canny_output.cols - colR;
-	int wL = colL;
-	int dif = (wR - wL) / 2;
-
-	line(clone, Point(colL, imgHeight / 2 - 10), Point(colL, imgHeight / 2 + 10), Scalar(0, 0, 255), 1, CV_AA);
-	line(clone, Point(colR, imgHeight / 2 - 10), Point(colR, imgHeight / 2 + 10), Scalar(0, 0, 255), 1, CV_AA);
-	//***************** @@LATERAIS
-	//***************** GOLA
-	for (int i = canny_output.rows/2; i > 0; i--)
-	{
-		if ((int)canny_output.at<uchar>(i, (canny_output.cols / 2)-dif) > 0 && rowM==0)
+		//**** 2ND LATERAIS
+		for (int j = canny_output.cols / 2; j > 0; j--)
 		{
-			rowM = i;
+			if ((int)canny_output.at<uchar>((canny_output.rows / 2)+INC_HEIGHT, j) > 0)
+			{
+				col2L = j;
+				break;
+			}
 		}
-		if ((int)canny_output.at<uchar>(i, (canny_output.cols / 2 - 20)-dif) > 0 && rowL == 0)
+		for (int k = canny_output.cols / 2; k < canny_output.cols; k++)
 		{
-			rowL = i;
+			if ((int)canny_output.at<uchar>((canny_output.rows / 2)+INC_HEIGHT, k) > 0)
+			{
+				col2R = k;
+				break;
+			}
 		}
-		if ((int)canny_output.at<uchar>(i, (canny_output.cols / 2 + 20)-dif) > 0 && rowR == 0)
+		int wR = canny_output.cols - colR;
+		int wL = colL;
+		int dif = (wR - wL) / 2;
+
+		line(clone, Point(colL, imgHeight / 2 - 10), Point(colL, imgHeight / 2 + 10), Scalar(0, 0, 255), 1, CV_AA);
+		line(clone, Point(colR, imgHeight / 2 - 10), Point(colR, imgHeight / 2 + 10), Scalar(0, 0, 255), 1, CV_AA);
+
+		line(clone, Point(col2L, (imgHeight / 2)+INC_HEIGHT - 10), Point(col2L, (imgHeight / 2)+INC_HEIGHT + 10), Scalar(0, 0, 255), 1, CV_AA);
+		line(clone, Point(col2R, (imgHeight / 2)+INC_HEIGHT - 10), Point(col2R, (imgHeight / 2)+INC_HEIGHT + 10), Scalar(0, 0, 255), 1, CV_AA);
+		//***************** @@LATERAIS
+		//***************** GOLA
+		for (int i = canny_output.rows / 2; i > 0; i--)
 		{
-			rowR = i;
+			if ((int)canny_output.at<uchar>(i, (canny_output.cols / 2) - dif) > 0 && rowM == 0)
+			{
+				rowM = i;
+			}
+			if ((int)canny_output.at<uchar>(i, (canny_output.cols / 2 - 20) - dif) > 0 && rowL == 0)
+			{
+				rowL = i;
+			}
+			if ((int)canny_output.at<uchar>(i, (canny_output.cols / 2 + 20) - dif) > 0 && rowR == 0)
+			{
+				rowR = i;
+			}
 		}
-	}
 
 
 
-	line(clone, Point((imgWidth / 2 - 10) - dif, rowM), Point((imgWidth / 2 + 10) - dif, rowM), Scalar(100, 0, 255), 1, CV_AA);
-	line(clone, Point((imgWidth / 2 - 25) - dif, rowL), Point((imgWidth / 2 - 15) - dif, rowL), Scalar(0, 255, 255), 1, CV_AA);
-	line(clone, Point((imgWidth / 2 + 15) - dif, rowR), Point((imgWidth / 2 + 25) - dif, rowR), Scalar(0, 255, 255), 1, CV_AA);
-	//line(clone, Point((imgWidth / 2 - 20)-dif, rowB), Point((imgWidth / 2 + 20)-dif, rowB), Scalar(100, 0, 255), 1, CV_AA);
+		line(clone, Point((imgWidth / 2 - 10) - dif, rowM), Point((imgWidth / 2 + 10) - dif, rowM), Scalar(100, 0, 255), 1, CV_AA);
+		line(clone, Point((imgWidth / 2 - 25) - dif, rowL), Point((imgWidth / 2 - 15) - dif, rowL), Scalar(0, 255, 255), 1, CV_AA);
+		line(clone, Point((imgWidth / 2 + 15) - dif, rowR), Point((imgWidth / 2 + 25) - dif, rowR), Scalar(0, 255, 255), 1, CV_AA);
+		//line(clone, Point((imgWidth / 2 - 20)-dif, rowB), Point((imgWidth / 2 + 20)-dif, rowB), Scalar(100, 0, 255), 1, CV_AA);
 
-	//******************@@GOLA
+		//******************@@GOLA
 
-	//***************** ANGULO
-	double ang, m, top, bottom, deg;
+		//***************** ANGULO
+		double ang, m, top, bottom, deg;
 
-	top = (rowL - rowR);
-	bottom = (((canny_output.cols / 2 - 20) - dif) - ((canny_output.cols / 2 + 20) - dif));
+		top = (rowL - rowR);
+		bottom = (((canny_output.cols / 2 - 20) - dif) - ((canny_output.cols / 2 + 20) - dif));
 
-	m = top / bottom;
+		m = top / bottom;
 
-	ang = atan(m);
+		ang = atan(m);
 
-	deg = ang*(180 / 3.14159265 );
+		deg = ang*(180 / 3.14159265);
 
-	//cout.precision(9);
-	//cout << fixed << rowL << "-" << rowR << "/" << ((canny_output.cols / 2 - 20) - dif) << "-" << ((canny_output.cols / 2 + 20) - dif) << "=" << m << "<=> ang=" << deg << endl;
-	//****************» @@ANGULO
+		//********* RECTA MEDIANA
+		int media1 = (colR - colL) / 2 + colL;
+		int media2 = (col2R - col2L) / 2 + col2L;
+		line(clone, Point(media1, (imgHeight / 2)), Point(media2, (imgHeight / 2) + INC_HEIGHT), Scalar(0, 255, 255), 1, CV_AA);
+		double tm = ((imgHeight / 2) + INC_HEIGHT) - (imgHeight / 2);
+		double bm = media2 - media1;
 
-	int hT = rowM;
-	int hB = canny_output.rows - rowB;
-	int difH = -rowM;// (hB - hT) / 2;
+		double mm = 0;
+		if(bm!=0)
+			mm = tm / bm;
+		
 
-	int *rows = new int[3];
-	rows[0] = rowL;
-	rows[1] = rowM;
-	rows[2] = rowR;
-	int frst=0;
+		double angM = atan(mm);
+		double degM = angM*(180 / 3.14159265);
+		degM = degM - 90;
+	//	cout << "ang: " << angM << "\n";
+	//	cout << "deg: " << degM << "\n";
 
-	for (int m = 0; m < sizeof(rows); m++)
-	{
-		if (rows[m]>frst)
-			frst = rows[m];
-	}
-	difH = -frst;
+		//cout.precision(9);
+		//cout << fixed << rowL << "-" << rowR << "/" << ((canny_output.cols / 2 - 20) - dif) << "-" << ((canny_output.cols / 2 + 20) - dif) << "=" << m << "<=> ang=" << deg << endl;
+		//****************» @@ANGULO
 
-	Point c1 = Point(imgWidth / 2 - 20 - dif , imgHeight / 2 - difH);
-	Point c2 = Point(imgWidth / 2 + 20 - dif, imgHeight / 2 - difH);
-	Point c3 = Point(imgWidth / 2 - dif, imgHeight / 2 - 20 - difH);
-	Point c4 = Point(imgWidth / 2 - dif, imgHeight / 2 + 20 - difH);
-	line(clone, c1, c2, Scalar(100, 0, 255), 1, CV_AA);
-	line(clone, c3, c4, Scalar(100, 0, 255), 1, CV_AA);
+		int hT = rowM;
+		int hB = canny_output.rows - rowB;
+		int difH = -rowM;// (hB - hT) / 2;
 
-	drawGripper(clone, Point2f(((imgWidth / 2) - dif), ((imgHeight / 2) - difH)), deg);
+		int *rows = new int[3];
+		rows[0] = rowL;
+		rows[1] = rowM;
+		rows[2] = rowR;
+		int frst = 0;
 
+		for (int m = 0; m < sizeof(rows); m++)
+		{
+			if (rows[m]>frst)
+				frst = rows[m];
+		}
+		difH = -frst;
+
+		Point c1 = Point(imgWidth / 2 - 20 - dif, imgHeight / 2 - difH);
+		Point c2 = Point(imgWidth / 2 + 20 - dif, imgHeight / 2 - difH);
+		Point c3 = Point(imgWidth / 2 - dif, imgHeight / 2 - 20 - difH);
+		Point c4 = Point(imgWidth / 2 - dif, imgHeight / 2 + 20 - difH);
+		line(clone, c1, c2, Scalar(100, 0, 255), 1, CV_AA);
+		line(clone, c3, c4, Scalar(100, 0, 255), 1, CV_AA);
+
+		int gripX = ((imgWidth / 2) - dif);
+		int gripY = ((imgHeight / 2) - difH);
+		drawGripper(clone, Point2f(gripX, gripY), degM);
+
+		
+
+		if (getReadTag() == 1)
+		{
+			if (degM == 90 || degM == -90)
+				degM = 0;
+			if (degM < 10 && degM > -10 && getMeasure(dif) < 100 && getMeasure(difH) < 100)
+			{
+				drawStatus(clone, Scalar(0, 255, 0), "WRITE");
+				Sleep(10);
+				writeXLS(getMeasure(dif), getMeasure(difH), degM);
+			}
+		}
+		else
+			drawStatus(clone, Scalar(0, 0, 255), "READ");
 
 	imshow("CONTOUR", canny_output);
 	imshow("ORIGINAL", clone);
@@ -271,8 +659,17 @@ int _tmain(int argc, _TCHAR* argv[])
 	printf("== CONTOUR DETECTION                                TARAMBOLA DEVELOPMENT ==\n");
 	printf("==============================================================================\n\n");
 
+	//**** load config xml
+	HRESULT hr = CoInitialize(NULL);
+	if (SUCCEEDED(hr))
+	{
+		loadDOM();
+		CoUninitialize();
+	}
+
 	//************** CAMERA
-	VideoCapture cap(0);
+	cap.open(1);
+	//cap.open("video.MP4");
 	if (!cap.isOpened())
 	{
 		cout << "CAMERA NOT CONNECTED!";
@@ -289,24 +686,44 @@ int _tmain(int argc, _TCHAR* argv[])
 	Sleep(2);
 	//cap.set(CV_CAP_PROP_FPS, 1);
 	Sleep(2);
-	cap.set(CV_CAP_PROP_FRAME_WIDTH, 320);
+	cap.set(CV_CAP_PROP_FRAME_WIDTH, 1280);
 	Sleep(2);
-	cap.set(CV_CAP_PROP_FRAME_HEIGHT, 240);
+	cap.set(CV_CAP_PROP_FRAME_HEIGHT, 720);
 	Sleep(2);
-	cap.set(CV_CAP_PROP_BRIGHTNESS, 100.0);
+	cap.set(CV_CAP_PROP_BRIGHTNESS, beta);
 	Sleep(2);
-	cap.set(CV_CAP_PROP_CONTRAST, 10.0);
+	cap.set(CV_CAP_PROP_CONTRAST, alpha);
 	Sleep(2);
-	cap.set(CV_CAP_PROP_EXPOSURE, 10.0);
+	cap.set(CV_CAP_PROP_EXPOSURE, exposure);
+	Sleep(2);
+	cap.set(CV_CAP_PROP_ZOOM, 0);
+	//Sleep(2);
+	//cap.set(CV_CAP_PROP_XI_OFFSET_X, -100);
+	
+	cout << cap.get(CV_CAP_PROP_EXPOSURE);
+	cout << "\n" << cap.get(CV_CAP_PROP_FRAME_WIDTH);
+
+	while (cap.get(CV_CAP_PROP_FRAME_WIDTH) == 0)
+	{
+		cout << "\n" << cap.get(CV_CAP_PROP_FRAME_WIDTH);
+		Sleep(1000);
+	}
 
 	cap >> src;
-	cvtColor(src, src_gray, CV_BGR2GRAY);
+	
+	if (src.empty())
+		return(-2);
+	else if (src.channels()>1)
+		cvtColor(src, src_gray, CV_BGR2GRAY);
+	else src_gray = src;
 
-	cout << cap.get(CV_CAP_PROP_MODE);
+	//cvtColor(src, src_gray, CV_BGR2GRAY);
+
+	
 
 
-//	 resize(src, src, Size(), 0.5, 0.5, INTER_CUBIC);
-//	 resize(src_gray, src_gray, Size(), 0.5, 0.5, INTER_CUBIC);
+	// resize(src, src, Size(), 0.5, 0.5, INTER_CUBIC);
+	// resize(src_gray, src_gray, Size(), 0.5, 0.5, INTER_CUBIC);
 
 	 /// Convert image to gray and blur it
 	
@@ -325,8 +742,10 @@ int _tmain(int argc, _TCHAR* argv[])
 	createTrackbar("Canny thresh:", "CONTOUR", &thresh, max_thresh, thresh_callback2);
 	createTrackbar("Blur:", "CONTOUR", &blurValue, 8, thresh_callback);
 	//createTrackbar("Corner thresh:", "CONTOUR", &thresh_corner, max_thresh, detectCorners);
-	//createTrackbar("Bright:", "CONTOUR", &beta, 300, detectCorners);
-	//createTrackbar("Contrast:", "CONTOUR", &alpha, 3, detectCorners);
+	createTrackbar("Bright:", "CONTOUR", &beta, 300, setBright);
+	createTrackbar("Contrast:", "CONTOUR", &alpha, 20, setContrast);
+	createTrackbar("Exposure:", "CONTOUR", &exposure, 20, setExposure);
+	//createTrackbar("OffsetX:", "CONTOUR", &offsetX, 200, setOffset);
 	
 	detectCorners(0, 0);
 
@@ -338,14 +757,31 @@ int _tmain(int argc, _TCHAR* argv[])
 
 	while (1)
 	{
-		Sleep(2);
+		Sleep(100);
+	//	resize(src, src, Size(), 0.1, 0.1, INTER_CUBIC);
+	//	resize(src_gray, src_gray, Size(), 0.1, 0.1, INTER_CUBIC);
+
+		if (cap.get(CV_CAP_PROP_POS_AVI_RATIO) == 1)
+			cap.set(CV_CAP_PROP_POS_FRAMES, 1);
+
+
+		cap.read(src);
+		//cap >> src;
+		if (src.empty())
+			return(-2);
+		else if (src.channels()>1)
+			cvtColor(src, src_gray, CV_BGR2GRAY);
+		else src_gray = src;
+		//cvtColor(src, src_gray, CV_BGR2GRAY);
 
 		thresh_callback(thresh, 0);
-		
-		cap >> src;
-		cvtColor(src, src_gray, CV_BGR2GRAY);
+
 
 		int key = waitKey(10);
+		if (key == 99)
+			calibrate();
+		if (key == 115)
+			saveXML();
 		if (key == 27) break;
 	}
 	return 0;
