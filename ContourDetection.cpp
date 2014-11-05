@@ -12,38 +12,13 @@
 #include "opencv2\highgui\highgui.hpp"
 #include "opencv2\imgproc\imgproc.hpp"
 
+#include "ContourDetection.h"
 #include "libxl.h"
 
 using namespace cv;
 using namespace std;
 using namespace libxl;
 //using namespace MSXML2;
-
-#define PI 3.14159265;
-// Macro that calls a COM method returning HRESULT value.
-#define CHK_HR(stmt)        do { hr=(stmt); if (FAILED(hr)) goto CleanUp; } while(0)
-// Macro to verify memory allcation.
-#define CHK_ALLOC(p)        do { if (!(p)) { hr = E_OUTOFMEMORY; goto CleanUp; } } while(0)
-// Macro that releases a COM object if not NULL.
-#define SAFE_RELEASE(p)     do { if ((p)) { (p)->Release(); (p) = NULL; } } while(0)
-
-Mat src, src_gray, src_canny;
-int thresh = 100;
-int max_thresh = 255;
-RNG rng(12345);
-float nearD = 1000;
-Point near1, near2;
-int imgWidth;
-int imgHeight;
-int thresh_corner = 200;
-int alpha = 10; /**< Simple contrast control */
-int beta = 0;  /**< Simple brightness control */
-int exposure = 6;
-int blurValue = 1;
-VideoCapture cap;
-int isCalib = 0;
-int calibTotal=0;
-int offsetX = 100;
 
 //************* @XML
 void saveXML()
@@ -280,7 +255,7 @@ int getMeasure(int value)
 	int x = (210 * value) / calibTotal;
 	return(x);
 }
-void writeXLS(int x, int y, int rot)
+void writeXLS(int x, int y, float rot)
 {
 	Book* book = xlCreateBook(); // xlCreateXMLBook() for xlsx
 	if (book)
@@ -428,7 +403,7 @@ void drawGripper(Mat img, Point2f center, float angle)
 /** @function thresh_callback */
 void thresh_callback(int, void*)
 {
-	Mat canny_output;
+	Mat canny_output, gray_clone;
 	Mat blured;
 	Mat lap;
 	if (blurValue != 0)
@@ -439,13 +414,16 @@ void thresh_callback(int, void*)
 
 	blured.convertTo(lap, -1, alpha, beta);
 
+	gray_clone = blured.clone();
+	//threshold(gray_clone, gray_clone, 220, 255, THRESH_BINARY);
+
 	Canny(blured, canny_output, thresh, thresh * 2, 3);
 
 	vector<Vec2f> lines;
 	// detect lines
 	HoughLines(canny_output, lines, 1, CV_PI / 180, 150, 0, 0);
 
-	Mat clone = src.clone();
+	Mat clone = src.clone();  
 	Point c = Point(imgWidth/2,imgHeight/2);
 
 	src_canny = canny_output;
@@ -631,28 +609,51 @@ void thresh_callback(int, void*)
 
 		int gripX = ((imgWidth / 2) - dif);
 		int gripY = ((imgHeight / 2) - difH);
+		if (degM == 90 || degM == -90)
+			degM = 0;
 		drawGripper(clone, Point2f(gripX, gripY), degM);
 
 		
 
 		if (getReadTag() == 1)
 		{
+			float tmp = degM * 100;
+			int tmp2 = tmp;
+			double tmp3 = (double)tmp2 / 100.00;
 			if (degM == 90 || degM == -90)
 				degM = 0;
 			if (degM < 10 && degM > -10 && getMeasure(dif) < 100 && getMeasure(difH) < 100)
 			{
 				drawStatus(clone, Scalar(0, 255, 0), "WRITE");
 				Sleep(10);
-				writeXLS(getMeasure(dif), getMeasure(difH), degM);
+				writeXLS(getMeasure(dif), getMeasure(difH), tmp3);
 			}
 		}
 		else
-			drawStatus(clone, Scalar(0, 0, 255), "READ");
+			drawStatus(clone, Scalar(0, 0, 255), "WAIT");
 
 	imshow("CONTOUR", canny_output);
 	imshow("ORIGINAL", clone);
+	imshow("GRAY", gray_clone);
 }
 
+void getCameraInfo(VideoCapture m_cam){
+	std::cout << "CV_CAP_PROP_FRAME_WIDTH " << m_cam.get(CV_CAP_PROP_FRAME_WIDTH) << std::endl;
+	std::cout << "CV_CAP_PROP_FRAME_HEIGHT " << m_cam.get(CV_CAP_PROP_FRAME_HEIGHT) << std::endl;
+	std::cout << "CV_CAP_PROP_FPS " << m_cam.get(CV_CAP_PROP_FPS) << std::endl;
+	std::cout << "CV_CAP_PROP_EXPOSURE " << m_cam.get(CV_CAP_PROP_EXPOSURE) << std::endl;
+	std::cout << "CV_CAP_PROP_FORMAT " << m_cam.get(CV_CAP_PROP_FORMAT) << std::endl; //deafult CV_8UC3?!
+	std::cout << "CV_CAP_PROP_CONTRAST " << m_cam.get(CV_CAP_PROP_CONTRAST) << std::endl;
+	std::cout << "CV_CAP_PROP_BRIGHTNESS " << m_cam.get(CV_CAP_PROP_BRIGHTNESS) << std::endl;
+	std::cout << "CV_CAP_PROP_SATURATION " << m_cam.get(CV_CAP_PROP_SATURATION) << std::endl;
+	std::cout << "CV_CAP_PROP_HUE " << m_cam.get(CV_CAP_PROP_HUE) << std::endl;
+	std::cout << "CV_CAP_PROP_POS_FRAMES " << m_cam.get(CV_CAP_PROP_POS_FRAMES) << std::endl;
+	std::cout << "CV_CAP_PROP_FOURCC " << m_cam.get(CV_CAP_PROP_FOURCC) << std::endl;
+
+	int ex = static_cast<int>(m_cam.get(CV_CAP_PROP_FOURCC));     // Get Codec Type- Int form
+	char EXT[] = { (char)(ex & 255), (char)((ex & 0XFF00) >> 8), (char)((ex & 0XFF0000) >> 16), (char)((ex & 0XFF000000) >> 24), 0 };
+	cout << "Input codec type: " << EXT << endl;
+}
 int _tmain(int argc, _TCHAR* argv[])
 {
 	printf("==============================================================================\n");
@@ -669,13 +670,18 @@ int _tmain(int argc, _TCHAR* argv[])
 
 	//************** CAMERA
 	cap.open(1);
+	//cap.set(CV_CAP_PROP_FOURCC, CV_FOURCC('M', 'J', 'P', 'G'));
+	cap.set(CV_CAP_PROP_SHARPNESS, 20);
+	cap.set(CV_CAP_PROP_FPS, 12);
+	cap.set(CV_CAP_PROP_FRAME_HEIGHT, 1080);
+	cap.set(CV_CAP_PROP_FRAME_WIDTH, 1920);
 	//cap.open("video.MP4");
 	if (!cap.isOpened())
 	{
 		cout << "CAMERA NOT CONNECTED!";
 		return(-1);
 	}
-	
+	getCameraInfo(cap);
 	
 	//»»»»»»»»»»»»»» IMAGE
 	// src_gray = imread( "red2.jpg", 0);
@@ -686,9 +692,9 @@ int _tmain(int argc, _TCHAR* argv[])
 	Sleep(2);
 	//cap.set(CV_CAP_PROP_FPS, 1);
 	Sleep(2);
-	cap.set(CV_CAP_PROP_FRAME_WIDTH, 1280);
+//	cap.set(CV_CAP_PROP_FRAME_WIDTH, 1280);
 	Sleep(2);
-	cap.set(CV_CAP_PROP_FRAME_HEIGHT, 720);
+//	cap.set(CV_CAP_PROP_FRAME_HEIGHT, 720);
 	Sleep(2);
 	cap.set(CV_CAP_PROP_BRIGHTNESS, beta);
 	Sleep(2);
@@ -698,7 +704,7 @@ int _tmain(int argc, _TCHAR* argv[])
 	Sleep(2);
 	cap.set(CV_CAP_PROP_ZOOM, 0);
 	//Sleep(2);
-	//cap.set(CV_CAP_PROP_XI_OFFSET_X, -100);
+	//cap.set(CV_CAP_PROP_XI_OFFSET_X, 100);
 	
 	cout << cap.get(CV_CAP_PROP_EXPOSURE);
 	cout << "\n" << cap.get(CV_CAP_PROP_FRAME_WIDTH);
@@ -710,13 +716,16 @@ int _tmain(int argc, _TCHAR* argv[])
 	}
 
 	cap >> src;
+
+	cap.set(CV_CAP_PROP_FRAME_WIDTH, 1920);
+	cap.set(CV_CAP_PROP_FRAME_HEIGHT, 1080);
 	
 	if (src.empty())
 		return(-2);
 	else if (src.channels()>1)
 		cvtColor(src, src_gray, CV_BGR2GRAY);
 	else src_gray = src;
-
+	
 	//cvtColor(src, src_gray, CV_BGR2GRAY);
 
 	
@@ -735,6 +744,7 @@ int _tmain(int argc, _TCHAR* argv[])
 	//************ WINDOW **************
 	namedWindow("CONTOUR", CV_WINDOW_AUTOSIZE);
 	namedWindow("ORIGINAL", CV_WINDOW_AUTOSIZE);
+	namedWindow("GRAY", CV_WINDOW_AUTOSIZE);
 
 	imgWidth = src.size().width;
 	imgHeight = src.size().height;
@@ -761,11 +771,9 @@ int _tmain(int argc, _TCHAR* argv[])
 	//	resize(src, src, Size(), 0.1, 0.1, INTER_CUBIC);
 	//	resize(src_gray, src_gray, Size(), 0.1, 0.1, INTER_CUBIC);
 
-		if (cap.get(CV_CAP_PROP_POS_AVI_RATIO) == 1)
-			cap.set(CV_CAP_PROP_POS_FRAMES, 1);
-
 
 		cap.read(src);
+
 		//cap >> src;
 		if (src.empty())
 			return(-2);

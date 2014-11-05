@@ -1,9 +1,9 @@
 <?xmlversion = '1.0' ?> 
 <config xmlns:dt='urn:schemas - microsoft - com : datatypes'>
-<threshold dt:dt='int'>50</threshold>
-<blur dt:dt='int'>4</blur>
-<bright dt:dt='int'>0</bright>
+<threshold dt:dt='int'>27</threshold>
+<blur dt:dt='int'>3</blur>
+<bright dt:dt='int'>73</bright>
 <contrast dt:dt='int'>10</contrast>
 <exposure dt:dt='int'>-6</exposure>
-<measure dt:dt='int'>114</measure>
+<measure dt:dt='int'>153</measure>
 </config>
